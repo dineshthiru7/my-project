@@ -82,3 +82,139 @@ File: {func_data["file"]}
 Function: {func_data["function"]}
 
 Code:
+
+
+
+
+# Final production-ready Python script:
+# - Clones a GitHub repo
+# - Extracts repo graph (file + functions)
+# - Matches Jira summary to code
+# - Generates prompt for GenAI (OpenAI optional)
+
+import os
+import re
+import subprocess
+import shutil
+import json
+
+# --- CONFIGURATION ---
+GIT_URL = "https://github.com/spring-projects/spring-petclinic.git"  # Replace with your own repo if needed
+CLONE_DIR = "/mnt/data/cloned_repo"
+JIRA_TICKET = {
+    "ticketId": "APERP-10",
+    "summary": "Add logging in pet service to track successful pet creation"
+}
+PROMPT_SAVE_PATH = "/mnt/data/genai_prompt.txt"
+USE_OPENAI = False  # Set to True to enable OpenAI call
+OPENAI_API_KEY = "sk-your-key-here"  # Replace with real key if needed
+
+
+# --- CLONE GIT REPO ---
+def clone_repo(git_url, target_dir):
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir)
+    subprocess.run(["git", "clone", git_url, target_dir], check=True)
+
+
+# --- EXTRACT FUNCTIONS FROM REPO ---
+def extract_repo_graph(repo_path):
+    repo_graph = []
+    for root, dirs, files in os.walk(repo_path):
+        for file in files:
+            if file.endswith(".java"):
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, "r", encoding="utf8", errors="ignore") as f:
+                        content = f.read()
+                        matches = re.findall(r"(public|private|protected)?\s+\w+\s+(\w+)\s*\(.*?\)\s*{", content)
+                        for _, func_name in matches:
+                            repo_graph.append({
+                                "file": file_path,
+                                "function": func_name,
+                                "code": content
+                            })
+                except Exception as e:
+                    print(f"Error reading {file_path}: {e}")
+    return repo_graph
+
+
+# --- MATCH JIRA SUMMARY TO FUNCTION ---
+def score_function(summary, func_data):
+    score = 0
+    words = summary.lower().split()
+    if any(w in func_data["file"].lower() for w in words):
+        score += 1
+    if any(w in func_data["function"].lower() for w in words):
+        score += 1
+    return score
+
+
+def find_best_match(ticket, repo_graph):
+    scored = [(score_function(ticket["summary"], f), f) for f in repo_graph]
+    scored.sort(reverse=True, key=lambda x: x[0])
+    return scored[0][1] if scored and scored[0][0] > 0 else None
+
+
+# --- BUILD PROMPT FOR GENAI ---
+def create_prompt(ticket, func_data):
+    return f"""
+You are an expert Java developer.
+
+Jira Ticket:
+ID: {ticket["ticketId"]}
+Summary: {ticket["summary"]}
+
+Here is the relevant function from the repo:
+File: {func_data["file"]}
+Function: {func_data["function"]}
+
+Code:
+```
+{func_data["code"]}
+```
+
+Please add success logging logic related to the Jira summary inside this function.
+"""
+
+
+# --- OPTIONAL: CALL OPENAI ---
+def call_openai(prompt):
+    import openai
+    openai.api_key = OPENAI_API_KEY
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "You are an expert Java developer."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3
+    )
+    return response.choices[0].message.content.strip()
+
+
+# --- MAIN EXECUTION ---
+try:
+    clone_repo(GIT_URL, CLONE_DIR)
+    repo_graph = extract_repo_graph(CLONE_DIR)
+    matched_function = find_best_match(JIRA_TICKET, repo_graph)
+
+    if matched_function:
+        final_prompt = create_prompt(JIRA_TICKET, matched_function)
+
+        # Save prompt
+        with open(PROMPT_SAVE_PATH, "w") as f:
+            f.write(final_prompt)
+
+        if USE_OPENAI:
+            llm_output = call_openai(final_prompt)
+            print("✅ Generated Code:\n", llm_output[:1000])
+        else:
+            print("✅ Prompt generated. Saved to:", PROMPT_SAVE_PATH)
+    else:
+        print("❌ No function matched the Jira summary.")
+
+except Exception as e:
+    print("❌ Error:", str(e))
+
+
